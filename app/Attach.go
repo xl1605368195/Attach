@@ -42,7 +42,7 @@ func (this *VirtualMachine) Attach() error {
 			count++
 			time.Sleep(200 * time.Millisecond)
 			// 文件不存在时
-			if !this.existsSocketFile() || count < 25 {
+			if !this.existsSocketFile() && count < 25 {
 				err = syscall.Kill(int(this.Pid), syscall.SIGQUIT)
 				if err != nil {
 					return fmt.Errorf("Canot send sigquit to java[%d],%v", this.Pid, err)
