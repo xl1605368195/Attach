@@ -10,10 +10,15 @@ import (
 	"time"
 )
 
+const (
+	timeOut   = 5000
+	delayStep = 100
+)
+
 type VirtualMachine struct {
-	Pid          int32   // 目标进程 PID
-	SocketPath   string  // .java_pidXXX 文件路径
-	Socket       *Socket // Socket 连接
+	Pid          int32        // 目标进程 PID
+	SocketPath   string       // .java_pidXXX 文件路径
+	Socket       *Socket      // Socket 连接
 	SockFileLock sync.RWMutex // socketFile 的锁，线程安全的将sockPath置为空字符串
 }
 
@@ -34,26 +39,29 @@ func (this *VirtualMachine) Attach() error {
 		}
 		err = syscall.Kill(int(this.Pid), syscall.SIGQUIT)
 		if err != nil {
-			return fmt.Errorf("Canot send sigquit to java[%d],%v", this.Pid, err)
+			return fmt.Errorf("canot send sigquit to java[%d],%v", this.Pid, err)
 		}
-		// 判断文件是否创建
-		count := 0
-		for {
-			count++
-			time.Sleep(200 * time.Millisecond)
-			// 文件不存在时
-			if !this.existsSocketFile() && count < 25 {
+		timeSpend := 0
+		delay := 0
+		// 循环条件：socket文件不存在并且未超时
+		// 参考代码open Jdk13下的src/jdk.attach/linux/classes/sun/tools/attach/VirtualMachineImpl.java
+		for ; !this.existsSocketFile() && timeSpend <= timeOut; {
+			delay += delayStep
+			time.Sleep(time.Duration(delay) * time.Millisecond)
+			timeSpend += delay
+			if timeSpend > timeOut/2 && !this.existsSocketFile() {
+				// 最后一次尝试发送SIGQUIT信号给目标JVM
 				err = syscall.Kill(int(this.Pid), syscall.SIGQUIT)
 				if err != nil {
-					return fmt.Errorf("Canot send sigquit to java[%d],%v", this.Pid, err)
+					return fmt.Errorf("canot send sigquit to java[%d],%v", this.Pid, err)
 				}
-				continue
-			} else {
-				break
 			}
 		}
 		if !this.existsSocketFile() {
-			return fmt.Errorf("attach err")
+			return fmt.Errorf("unable to open socket file %s: "+
+				"target process %d doesn't respond within %dms "+
+				"or HotSpot VM not loaded", this.SocketPath, this.Pid,
+				timeSpend)
 		}
 	}
 
@@ -91,7 +99,7 @@ func (this *VirtualMachine) createAttachFile() error {
 	attachFile := filepath.Join(os.TempDir(), fmt.Sprintf(".attach_pid%d", this.Pid))
 	f, err := os.Create(attachFile)
 	if err != nil {
-		return fmt.Errorf("Canot create attachfile,%v", err)
+		return fmt.Errorf("canot create attachFile,%v", err)
 	}
 	fmt.Printf("attach_pid=%s", attachFile)
 	defer f.Close()
@@ -101,7 +109,7 @@ func (this *VirtualMachine) createAttachFile() error {
 func (this *VirtualMachine) LoadAgent(agentJarPath string) error {
 	this.SockFileLock.Lock()
 	if this.SocketPath == "" {
-		return fmt.Errorf("Detach has run")
+		return fmt.Errorf("detach has run")
 	}
 	this.SockFileLock.Unlock()
 
@@ -115,7 +123,7 @@ func (this *VirtualMachine) LoadAgent(agentJarPath string) error {
 	}
 	//如果发送 agent jar 包成功，
 	if s != "0" {
-		return fmt.Errorf("Attach Fail")
+		return fmt.Errorf("send agent jar err")
 	}
 	defer func() {
 		_ = this.Socket.Close()
