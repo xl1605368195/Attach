@@ -17,16 +17,19 @@ const (
 
 type VirtualMachine struct {
 	Pid          int32        // 目标进程 PID
-	SocketPath   string       // .java_pidXXX 文件路径
+	SocketFile   string       // .java_pidXXX 文件
+	AttachFile   string       // .attach_pid 文件
 	Socket       *Socket      // Socket 连接
 	SockFileLock sync.RWMutex // socketFile 的锁，线程安全的将sockPath置为空字符串
 }
 
 func NewVirtualMachine(pid int32) *VirtualMachine {
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf(".java_pid%d", pid))
+	socketFile := filepath.Join(os.TempDir(), fmt.Sprintf(".java_pid%d", pid))
+	attachPath := filepath.Join(os.TempDir(), fmt.Sprintf(".attach_pid%d", pid))
 	return &VirtualMachine{
 		Pid:        pid,
-		SocketPath: socketPath,
+		SocketFile: socketFile,
+		AttachFile: attachPath,
 	}
 }
 
@@ -60,13 +63,15 @@ func (this *VirtualMachine) Attach() error {
 		if !this.existsSocketFile() {
 			return fmt.Errorf("unable to open socket file %s: "+
 				"target process %d doesn't respond within %dms "+
-				"or HotSpot VM not loaded", this.SocketPath, this.Pid,
+				"or HotSpot VM not loaded", this.SocketFile, this.Pid,
 				timeSpend)
 		}
+		// 用完attach_pidXXX就可以删除了，避免占用空间
+		this.deleteAttachFile()
 	}
 
 	// 监听 connet
-	addr, err := net.ResolveUnixAddr("unix", this.SocketPath)
+	addr, err := net.ResolveUnixAddr("unix", this.SocketFile)
 	if err != nil {
 		return err
 	}
@@ -82,13 +87,13 @@ func (this *VirtualMachine) Attach() error {
 func (this *VirtualMachine) Detach() {
 	this.SockFileLock.Lock()
 	defer this.SockFileLock.Unlock()
-	if this.SocketPath != "" {
-		this.SocketPath = ""
+	if this.SocketFile != "" {
+		this.SocketFile = ""
 	}
 }
 
 func (this *VirtualMachine) existsSocketFile() bool {
-	_, err := os.Stat(this.SocketPath)
+	_, err := os.Stat(this.SocketFile)
 	if err != nil {
 		return false
 	}
@@ -96,20 +101,29 @@ func (this *VirtualMachine) existsSocketFile() bool {
 }
 
 func (this *VirtualMachine) createAttachFile() error {
-	attachFile := filepath.Join(os.TempDir(), fmt.Sprintf(".attach_pid%d", this.Pid))
-	f, err := os.Create(attachFile)
+	f, err := os.Create(this.AttachFile)
 	if err != nil {
 		return fmt.Errorf("canot create attachFile,%v", err)
 	}
-	fmt.Printf("attach_pid=%s", attachFile)
 	defer f.Close()
 	return nil
 }
 
+func (this *VirtualMachine) deleteAttachFile() {
+	if _, err := os.Stat(this.AttachFile); err != nil {
+		return
+	}
+	err := os.Remove(this.AttachFile)
+	if err != nil {
+		return
+	}
+	return
+}
+
 func (this *VirtualMachine) LoadAgent(agentJarPath string) error {
 	this.SockFileLock.Lock()
-	if this.SocketPath == "" {
-		return fmt.Errorf("detach has run")
+	if this.SocketFile == "" {
+		return fmt.Errorf("detach function has run")
 	}
 	this.SockFileLock.Unlock()
 
@@ -123,7 +137,7 @@ func (this *VirtualMachine) LoadAgent(agentJarPath string) error {
 	}
 	//如果发送 agent jar 包成功，
 	if s != "0" {
-		return fmt.Errorf("send agent jar err")
+		return fmt.Errorf("load agent jar err")
 	}
 	defer func() {
 		_ = this.Socket.Close()
